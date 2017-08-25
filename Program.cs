@@ -353,6 +353,7 @@ namespace DHT
             datalist.InsertRange(0, BitConverter.GetBytes((UInt32)datalist.Count).Reverse());
             this.sock.Send(datalist.ToArray());
         }
+        private List<Tuple<int, byte[]>> TorList = new List<Tuple<int, byte[]>>();
         private bool check()
         {
             if(this.state == 0)
