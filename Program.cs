@@ -8,6 +8,7 @@ using BencodeNET.Objects;
 using System.Net.Sockets;
 using System.Net;
 using System.Threading;
+using System.IO;
 
 namespace DHT
 {
@@ -122,6 +123,7 @@ namespace DHT
                     result.Add("r", r);
                     var dataresult = result.EncodeAsBytes();
                     this.sock.BeginSendTo(dataresult, 0, dataresult.Length, SocketFlags.None, ipinfo, (ar) => { this.sock.EndSendTo(ar); }, null);
+                    WriteInfo("get_peers", info_hash.Value.ToArray(), null);
                     //this.InfoHashList.Add(info_hash.Value.ToArray());
 
                 }
@@ -138,12 +140,22 @@ namespace DHT
                         port = a.Get<BNumber>("port");
                     //CanDownload.Add(new Tuple<byte[], IPEndPoint>(info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port)));
                     Console.WriteLine("find a hash_info_candownload!!-------------------------------------");
+                    WriteInfo("announce_peer", info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port));
                 }
             }
             catch
             {
 
             }
+        }
+        private IPEndPoint defaultIP = new IPEndPoint(IPAddress.Loopback, 0);
+        private void WriteInfo(string commandName, byte[] info_hash, IPEndPoint ipadd)
+        {
+            var str = $"{commandName}:{info_hash.ToHexString()}:{(ipadd ?? defaultIP).ToString()}";
+            var fswriter = new StreamWriter(new FileStream("./logFile", FileMode.Append));
+            fswriter.WriteLine(str);
+            fswriter.Flush();
+            fswriter.Close();
         }
         private List<Tuple<byte[], IPEndPoint>> ParseList(byte[] data)
         {
@@ -227,65 +239,6 @@ namespace DHT
             return result;
         }
     }
-    //public class BittorrentDownloader
-    //{
-    //    public IPEndPoint Ipaddress = null;
-    //    public byte[] InfoHash = null;
-    //    public byte[] NodeID = null;
-    //    Socket sock = null;
-    //    public BittorrentDownloader(IPEndPoint ipinfo, byte[] infohash, byte[] nodeid)
-    //    {
-    //        this.Ipaddress = ipinfo;
-    //        this.InfoHash = infohash;
-    //        this.NodeID = nodeid;
-    //    }
-
-    //    public void StartWork()
-    //    {
-    //        this.sock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-    //        var con_event = new SocketAsyncEventArgs() { RemoteEndPoint = this.Ipaddress };
-    //        con_event.Completed += con_event_Completed;
-    //        if (!this.sock.ConnectAsync(con_event))
-    //        {
-    //            ConnectCallback(con_event, sock);
-    //            SocketAsyncEventArgs recvEventArgs = new SocketAsyncEventArgs();
-    //            recvEventArgs.BufferList = new List<ArraySegment<byte>>() { new ArraySegment<byte>(new byte[4096]) };
-    //            recvEventArgs.Completed += recvEventArgs_Completed;
-    //            if(!this.sock.ReceiveAsync(recvEventArgs))
-    //            {
-    //                RecvCallBack(recvEventArgs, sock);
-    //            }
-    //        }
-    //    }
-    //    private void RecvCallBack(SocketAsyncEventArgs e, Socket s)
-    //    {
-    //        try
-    //        {
-    //            // do sth when recvData
-    //            var recucount = e.BytesTransferred;
-    //        }
-    //        catch
-    //        {
-
-    //        }
-    //        if(!this.sock.ReceiveAsync(e))
-    //        {
-    //            RecvCallBack(e, s);
-    //        }
-    //    }
-    //    void recvEventArgs_Completed(object sender, SocketAsyncEventArgs e)
-    //    {
-    //        RecvCallBack(e, sock);
-    //    }
-    //    private void ConnectCallback(SocketAsyncEventArgs e, Socket s)
-    //    {
-    //        //do sth when connected
-    //    }
-    //    void con_event_Completed(object sender, SocketAsyncEventArgs e)
-    //    {
-    //        ConnectCallback(e, this.sock);
-    //    }
-    //}
     public class BittorrentDownloader
     {
         public IPEndPoint Ipaddress = null;
@@ -392,7 +345,6 @@ namespace DHT
                     var supose = parse.Parse<BDictionary>(dataBuf.Skip(2).ToArray());
                     if (!supose.ContainsKey("m"))
                         throw new Exception();
-                    BDictionary result = null;
                     var suplist = supose.Get<BDictionary>("m");
                     if (!suplist.ContainsKey("ut_metadata"))
                         throw new Exception();
@@ -420,6 +372,56 @@ namespace DHT
                 }
             }
             return false;
+        }
+    }
+    public static class HexHelper
+    {
+        public static string ToHexString(this byte[] data)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (var b in data)
+            {
+                var t = b / 16;
+                sb.Append((char)(t + (t <= 9 ? '0' : 'W')));
+                var f = b % 16;
+                sb.Append((char)(f + (f <= 9 ? '0' : 'W')));
+            }
+
+            return sb.ToString();
+        }
+        public static string ToHexString2(this byte[] data) => string.Join("", data.SelectMany((x) => new int[] { x / 16, x % 16 }).ToList().Select(x => (char)(x + (x <= 9 ? '0' : 'W'))));
+        public static byte[] ParseToHex(this string data)
+        {
+            if (data.Length % 2 != 0)
+                throw new Exception();
+            data = data.ToLower();
+            List<int> temp = new List<int>();
+            foreach (var c in data)
+            {
+                var t = c - '0';
+                if (t < 0)
+                    throw new Exception();
+                else if (t > 9)
+                {
+                    t = t - ('a' - '0');
+                    if (t < 0 || t > 5)
+                        throw new Exception();
+                    temp.Add(t + 10);
+                }
+                else
+                    temp.Add(t);
+            }
+            return temp.Tuken().Select(x => (byte)(x.Item1 * 16 + x.Item2)).ToArray();
+        }
+        public static IEnumerable<(T, T)> Tuken<T>(this IEnumerable<T> array)
+        {
+            if (array.Count() % 2 != 0)
+                throw new Exception();
+            for (int i = 0, len = array.Count(); i < len; i += 2)
+            {
+                var cc = array.Skip(i).Take(2).ToList();
+                yield return (cc[0], cc[1]);
+            }
         }
     }
 }
