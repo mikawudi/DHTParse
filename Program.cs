@@ -9,6 +9,7 @@ using System.Net.Sockets;
 using System.Net;
 using System.Threading;
 using System.IO;
+using System.Security.Cryptography;
 
 namespace DHT
 {
@@ -16,8 +17,26 @@ namespace DHT
     {
         static void Main(string[] args)
         {
-            var udpServer = new UDPServer(15222, IPAddress.Any);
+            //var dom = new Random();
+            //var bytes1 = new byte[20];
+            //var bytes2 = new byte[20];
+            //dom.NextBytes(bytes1);
+            //dom.NextBytes(bytes2);
+            //var a1 = bytes1.ToHexString();
+            //Console.WriteLine(a1);
+            //var a2 = bytes2.ToHexString();
+            //Console.WriteLine(a2);
+            //var bytes3 = new List<byte>();
+            //bytes3.AddRange(bytes1.Take(10));
+            //bytes3.AddRange(bytes2.Skip(10).Take(10));
+            //var bytes33 = bytes3.ToArray();
+            //var a3 = bytes33.ToHexString();
+            //Console.WriteLine(a3);
+
+
+            var udpServer = new UDPServer(6882, IPAddress.Any);
             udpServer.Run();
+            udpServer.ReJoin();
             udpServer.SendFindNode();
             Console.ReadLine();
         }
@@ -25,8 +44,9 @@ namespace DHT
     public class Helpers
     {
         private static Random r = new Random();
+        private static SHA1 sha1 = new SHA1CryptoServiceProvider();
         public static byte[] GetTil() { var result = new byte[2]; r.NextBytes(result); return result; }
-        public static byte[] GetRandomID() { var result = new byte[20]; r.NextBytes(result); return result; }
+        public static byte[] GetRandomID() { var result = new byte[20]; r.NextBytes(result); result = sha1.ComputeHash(result); return result; }
 
     }
     public class UDPServer
@@ -35,7 +55,7 @@ namespace DHT
         Socket sock = null;
         public UDPServer(int port, IPAddress addr)
         {
-            localID = Helpers.GetRandomID();
+            localID = GetRandomID();
             this.sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             this.sock.Bind(new IPEndPoint(addr, port));
         }
@@ -60,14 +80,14 @@ namespace DHT
                 Console.WriteLine(ex.ToString());
             }
             EndPoint newIp = new IPEndPoint(IPAddress.Loopback, 0);
-            this.sock.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref remoteAddrss, EndRecv, null);
+            this.sock.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref newIp, EndRecv, null);
         }
         BencodeParser parser = new BencodeParser();
         private void OnRecvMessage(byte[] data, IPEndPoint ipinfo)
         {
             try 
             {
-                var dic = parser.ParseString<BDictionary>(Encoding.ASCII.GetString(data));
+                var dic = parser.Parse<BDictionary>(data);
                 if(dic.Get<BString>("y") == "r")
                 {
                     var respNode = dic.Get<BDictionary>("r");
@@ -81,7 +101,7 @@ namespace DHT
                         throw new Exception("sd");
                     var tt = nodeList.Value.ToArray();
                     var ssss = ParseList(tt);
-                    foreach (var t in ssss.Distinct())
+                    foreach (var t in ssss)
                     {
                         lock(this.nodes)
                         {
@@ -89,9 +109,11 @@ namespace DHT
                             Console.WriteLine("find a node " + t.Item2);
                         }
                     }
+                    return;
                 }
                 if(dic.Get<BString>("y") == "q" && dic.Get<BString>("q") == "ping")
                 {
+                    Console.WriteLine("ping");
                     BDictionary resultDic = new BDictionary();
                     resultDic.Add("t", dic.Get<BString>("t"));
                     resultDic.Add("y", "r");
@@ -100,6 +122,7 @@ namespace DHT
                     resultDic.Add("r", r);
                     var dataresult = resultDic.EncodeAsBytes();
                     this.sock.BeginSendTo(dataresult, 0, dataresult.Length, SocketFlags.None, ipinfo, (ar) => { this.sock.EndSendTo(ar); }, null);
+                    return;
                 }
                 //if(dic.Get<BString>("y") == "q" && dic.Get<BString>("q") == "find_node")
                 //{
@@ -115,15 +138,18 @@ namespace DHT
                     result.Add("t", t);
                     result.Add("y", "r");
                     var r = new BDictionary();
-                    var random = new byte[20];
-                    new Random().NextBytes(random);
-                    r.Add("id", new BString(random));
+                    var neighbor = new List<byte>();
+                    neighbor.AddRange(info_hash.Value.Take(10));
+                    neighbor.AddRange(this.localID.Skip(10).Take(10));
+                    r.Add("id", new BString(neighbor));
                     r.Add("token", new BString(info_hash.Value.Take(2)));
                     r.Add("nodes", "");
                     result.Add("r", r);
                     var dataresult = result.EncodeAsBytes();
                     this.sock.BeginSendTo(dataresult, 0, dataresult.Length, SocketFlags.None, ipinfo, (ar) => { this.sock.EndSendTo(ar); }, null);
                     WriteInfo("get_peers", info_hash.Value.ToArray(), null);
+                    Console.WriteLine(info_hash.Value.ToArray().ToHexString() + "|" + ipinfo.ToString());
+                    return;
                     //this.InfoHashList.Add(info_hash.Value.ToArray());
 
                 }
@@ -141,11 +167,13 @@ namespace DHT
                     //CanDownload.Add(new Tuple<byte[], IPEndPoint>(info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port)));
                     Console.WriteLine("find a hash_info_candownload!!-------------------------------------");
                     WriteInfo("announce_peer", info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port));
+                    return;
                 }
+                Console.WriteLine("unknow pack");
             }
-            catch
+            catch(Exception ex)
             {
-
+                Console.WriteLine(ex);
             }
         }
         private IPEndPoint defaultIP = new IPEndPoint(IPAddress.Loopback, 0);
@@ -160,48 +188,79 @@ namespace DHT
         private List<Tuple<byte[], IPEndPoint>> ParseList(byte[] data)
         {
             var result = new List<Tuple<byte[], IPEndPoint>>();
-            for(int i = 0; i < data.Length / 26; i++)
+            for(int i = 0; i < data.Length; i += 26)
             {
-                var dd = data.Skip(i * 26).Take(26).ToArray();
+                var dd = data.Skip(i).Take(26).ToArray();
+                //var bc = dd.ToHexString();
+                //Console.WriteLine(bc);
                 var b = dd[24];
                 dd[24] = dd[25];
                 dd[25] = b;
-                result.Add(new Tuple<byte[], IPEndPoint>(dd.Take(20).ToArray(), new IPEndPoint(new IPAddress(dd.Skip(20).Take(4).ToArray()), BitConverter.ToUInt16(dd, 24))));
+                var id = dd.Take(20).ToArray();
+                var ip = new IPAddress(dd.Skip(20).Take(4).ToArray());
+                var port = BitConverter.ToUInt16(dd, 24);
+                var tt = new Tuple<byte[], IPEndPoint>(id, new IPEndPoint(ip, port));
+                result.Add(tt);
             }
             return result;
         }
         public Queue<Tuple<byte[], IPEndPoint>> nodes = new Queue<Tuple<byte[], IPEndPoint>>();
+        public void ReJoin()
+        {
+            new Thread(()=> {
+                while(true)
+                {
+                    int count = 0;
+                    lock(this.nodes)
+                    {
+                        count = this.nodes.Count;
+                    }
+                    if(count == 0)
+                    {
+                        var hosts = new List<string>()
+                        {
+                            "router.bittorrent.com",
+                            "dht.transmissionbt.com",
+                            "router.utorrent.com"
+                        }.Select(x => Dns.Resolve(x).AddressList[0]);
+                        foreach (var t in hosts)
+                        {
+                            SendFindNode(null, new IPEndPoint(t, 6881));
+                        }
+                    }
+                    Thread.Sleep(3 * 1000);
+                }
+            }).Start();
+        }
         public void SendFindNode()
         {
-            var hosts = new List<string>()
-            {
-                "router.bittorrent.com",
-                "dht.transmissionbt.com",
-                "router.utorrent.com"
-            }.Select(x => Dns.Resolve(x).AddressList[0]).ToList();
             while(true)
             {
                 Tuple<byte[], IPEndPoint> result = null;
                 lock(nodes)
                 {
                     if (nodes.Count > 0)
-                        result = nodes.Dequeue();
-                }
-                if(result == null)
-                {
-                    foreach(var x in hosts)
                     {
-                        SendFindNode(null, new IPEndPoint(x, 6881));
+                        result = nodes.Dequeue();
                     }
                 }
-                else
+                if(result != null)
                 {
                     SendFindNode(result.Item1, result.Item2);
                 }
-                Thread.Sleep(50);
+                Thread.Sleep((int)((1/50/5)*1000));
             }
         }
-        private void SendFindNode(byte[] data, IPEndPoint address)
+        private byte[] get_neighbor(byte[] target, byte[] nid)
+        {
+            var result = new byte[20];
+            for (int i = 0; i < 10; i++)
+                result[i] = target[i];
+            for (int i = 10; i < 20; i++)
+                result[i] = nid[i];
+            return result;
+        }
+        private void SendFindNode(byte[] data, IPEndPoint address, byte[] aaa = null, byte[] ttid = null)
         {
             byte[] nid = null;
             if(data == null)
@@ -210,10 +269,7 @@ namespace DHT
             }
             else
             {
-                var newid = new List<byte>();
-                newid.AddRange(data.Take(10));
-                newid.AddRange(this.localID.Skip(10).Take(10));
-                nid = newid.ToArray();
+                nid = get_neighbor(data, this.localID);
             }
             var tid = Helpers.GetTil();
             BDictionary sendData = new BDictionary();
@@ -229,7 +285,7 @@ namespace DHT
         private void Send(BDictionary data, IPEndPoint address)
         {
             var dataarrar = data.EncodeAsBytes();
-            this.sock.SendTo(dataarrar, address);
+            this.sock.BeginSendTo(dataarrar, 0, dataarrar.Length, SocketFlags.None, address, (x) => { this.sock.EndReceive(x); }, null);
         }
         static byte[] GetRandomID()
         {
@@ -422,6 +478,37 @@ namespace DHT
                 var cc = array.Skip(i).Take(2).ToList();
                 yield return (cc[0], cc[1]);
             }
+        }
+
+        public static byte[] ToDicBytes(this Dictionary<string, object> temp)
+        {
+            var result = new List<byte>();
+            result.Add((byte)'d');
+            foreach(var tempItem in temp)
+            {
+                var key = tempItem.Key;
+                if(tempItem.Value.GetType() == typeof(string))
+                {
+                    result.AddRange(Encoding.ASCII.GetBytes($"{key.Length}:{key}"));
+                    var value = tempItem.Value as string;
+                    result.AddRange(Encoding.ASCII.GetBytes($"{value.Length}:{value}"));
+                }
+                if(tempItem.Value.GetType() == typeof(byte[]))
+                {
+                    result.AddRange(Encoding.ASCII.GetBytes($"{key.Length}:{key}"));
+                    var value = tempItem.Value as byte[];
+                    result.AddRange(Encoding.ASCII.GetBytes($"{value.Length}:"));
+                    result.AddRange(value);
+                }
+                if(tempItem.Value.GetType() == typeof(Dictionary<string, object>))
+                {
+                    result.AddRange(Encoding.ASCII.GetBytes($"{key.Length}:{key}"));
+                    var val = ToDicBytes((Dictionary<string, Object>)tempItem.Value);
+                    result.AddRange(val);
+                }
+            }
+            result.Add((byte)'e');
+            return result.ToArray();
         }
     }
 }
