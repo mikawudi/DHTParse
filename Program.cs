@@ -38,6 +38,8 @@ namespace DHT
             udpServer.Run();
             udpServer.ReJoin();
             udpServer.SendFindNode();
+
+
             Console.ReadLine();
         }
     }
@@ -46,7 +48,16 @@ namespace DHT
         private static Random r = new Random();
         private static SHA1 sha1 = new SHA1CryptoServiceProvider();
         public static byte[] GetTil() { var result = new byte[2]; r.NextBytes(result); return result; }
-        public static byte[] GetRandomID() { var result = new byte[20]; r.NextBytes(result); result = sha1.ComputeHash(result); return result; }
+        public static byte[] GetRandomID()
+        {
+            var result = new byte[20];
+            r.NextBytes(result);
+            lock (sha1)
+            {
+                result = sha1.ComputeHash(result);
+                return result;
+            }
+        }
 
     }
     public class UDPServer
@@ -57,6 +68,12 @@ namespace DHT
         {
             localID = GetRandomID();
             this.sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            const long IOC_IN = 0x80000000;
+            const long IOC_VENDOR = 0x18000000;
+            const long SIO_UDP_CONNRESET = IOC_IN | IOC_VENDOR | 12;
+            byte[] optionInValue = { Convert.ToByte(false) };
+            byte[] optionOutValue = new byte[4];
+            this.sock.IOControl((IOControlCode)SIO_UDP_CONNRESET, optionInValue, optionOutValue);
             this.sock.Bind(new IPEndPoint(addr, port));
         }
         byte[] buffer = new byte[65535];
@@ -77,10 +94,22 @@ namespace DHT
             }
             catch(Exception ex)
             {
-                Console.WriteLine(ex.ToString());
+                //Console.WriteLine(ex.ToString());
             }
-            EndPoint newIp = new IPEndPoint(IPAddress.Loopback, 0);
-            this.sock.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref newIp, EndRecv, null);
+            bool notsuccess = false;
+            do
+            {
+                try
+                {
+                    this.sock.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref remoteAddrss, EndRecv, null);
+                    notsuccess = false;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex);
+                    notsuccess = true;
+                }
+            } while (notsuccess);
         }
         BencodeParser parser = new BencodeParser();
         private void OnRecvMessage(byte[] data, IPEndPoint ipinfo)
@@ -94,7 +123,7 @@ namespace DHT
                     var nodeList = respNode.Get<BString>("nodes");
                     if (nodeList == null || nodeList.Length == 0)
                     {
-                        Console.WriteLine("ping response " + ipinfo.ToString());
+                        //Console.WriteLine("ping response " + ipinfo.ToString());
                         return;
                     }
                     if (nodeList.Value.Count % 26 != 0)
@@ -106,14 +135,14 @@ namespace DHT
                         lock(this.nodes)
                         {
                             this.nodes.Enqueue(t);
-                            Console.WriteLine("find a node " + t.Item2);
+                            //Console.WriteLine("find a node " + t.Item2);
                         }
                     }
                     return;
                 }
                 if(dic.Get<BString>("y") == "q" && dic.Get<BString>("q") == "ping")
                 {
-                    Console.WriteLine("ping");
+                    //Console.WriteLine("ping");
                     BDictionary resultDic = new BDictionary();
                     resultDic.Add("t", dic.Get<BString>("t"));
                     resultDic.Add("y", "r");
@@ -147,7 +176,7 @@ namespace DHT
                     result.Add("r", r);
                     var dataresult = result.EncodeAsBytes();
                     this.sock.BeginSendTo(dataresult, 0, dataresult.Length, SocketFlags.None, ipinfo, (ar) => { this.sock.EndSendTo(ar); }, null);
-                    WriteInfo("get_peers", info_hash.Value.ToArray(), null);
+                    WriteInfo("get_peers", info_hash.Value.ToArray(), rid.Value.ToArray(), null);
                     Console.WriteLine(info_hash.Value.ToArray().ToHexString() + "|" + ipinfo.ToString());
                     return;
                     //this.InfoHashList.Add(info_hash.Value.ToArray());
@@ -155,6 +184,7 @@ namespace DHT
                 }
                 if (dic.Get<BString>("y") == "q" && dic.Get<BString>("q") == "announce_peer")
                 {
+                    var id = dic.Get<BString>("id");
                     var a = dic.Get<BDictionary>("a");
                     var info_hash = a.Get<BString>("info_hash");
                     int port = 0;
@@ -166,10 +196,11 @@ namespace DHT
                         port = a.Get<BNumber>("port");
                     //CanDownload.Add(new Tuple<byte[], IPEndPoint>(info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port)));
                     Console.WriteLine("find a hash_info_candownload!!-------------------------------------");
-                    WriteInfo("announce_peer", info_hash.Value.ToArray(), new IPEndPoint(ipinfo.Address, port));
+                    WriteInfo("announce_peer", info_hash.Value.ToArray(), id.Value.ToArray(), new IPEndPoint(ipinfo.Address, port));
                     return;
                 }
-                Console.WriteLine("unknow pack");
+                //Console.WriteLine("unknow pack");
+                //Console.WriteLine(dic.Keys.ToString());
             }
             catch(Exception ex)
             {
@@ -177,9 +208,9 @@ namespace DHT
             }
         }
         private IPEndPoint defaultIP = new IPEndPoint(IPAddress.Loopback, 0);
-        private void WriteInfo(string commandName, byte[] info_hash, IPEndPoint ipadd)
+        private void WriteInfo(string commandName, byte[] info_hash, byte[] nid, IPEndPoint ipadd)
         {
-            var str = $"{commandName}:{info_hash.ToHexString()}:{(ipadd ?? defaultIP).ToString()}";
+            var str = $"{commandName}:{info_hash.ToHexString()}:{nid.ToHexString()}:{(ipadd ?? defaultIP).ToString()}";
             var fswriter = new StreamWriter(new FileStream("./logFile", FileMode.Append));
             fswriter.WriteLine(str);
             fswriter.Flush();
@@ -205,10 +236,17 @@ namespace DHT
             return result;
         }
         public Queue<Tuple<byte[], IPEndPoint>> nodes = new Queue<Tuple<byte[], IPEndPoint>>();
+
         public void ReJoin()
         {
             new Thread(()=> {
-                while(true)
+                var hosts = new List<string>()
+                        {
+                            "router.bittorrent.com",
+                            "dht.transmissionbt.com",
+                            "router.utorrent.com"
+                        }.Select(x => Dns.Resolve(x).AddressList[0]).ToList();
+                while (true)
                 {
                     int count = 0;
                     lock(this.nodes)
@@ -217,12 +255,7 @@ namespace DHT
                     }
                     if(count == 0)
                     {
-                        var hosts = new List<string>()
-                        {
-                            "router.bittorrent.com",
-                            "dht.transmissionbt.com",
-                            "router.utorrent.com"
-                        }.Select(x => Dns.Resolve(x).AddressList[0]);
+                        
                         foreach (var t in hosts)
                         {
                             SendFindNode(null, new IPEndPoint(t, 6881));
